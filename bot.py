@@ -666,6 +666,58 @@ async def cmd_delrule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Vui lòng nhập số thứ tự. Ví dụ: `/delrule 2`", parse_mode="Markdown")
 
 # ============================================================
+# JOB: XỬ LÝ ALBUM SAU KHI ĐÃ GOM ĐỦ ẢNH
+# ============================================================
+async def process_album_job(context):
+    """Chạy sau 3 giây kể từ ảnh cuối cùng — đảm bảo đã gom đủ toàn bộ album."""
+    job      = context.job
+    data     = job.data
+    album_key = data["album_key"]
+    bot_data  = data["bot_data"]
+    user_id   = job.user_id
+    chat_id   = job.chat_id
+
+    buf = bot_data.get("album_buffer", {})
+    if album_key not in buf:
+        return
+
+    album     = buf.pop(album_key)
+    all_images   = album["images"]
+    caption_text = album.get("caption", "")
+
+    if not all_images:
+        return
+
+    main_image   = all_images[0]
+    extra_images = all_images[1:]
+
+    logger.info(f"Album {album_key}: {len(all_images)} ảnh, {len(extra_images)} ảnh phụ")
+
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"🖼️ Đã nhận {len(all_images)} ảnh — Groq AI đang viết bài..."
+    )
+
+    try:
+        raw_text = caption_text.strip() if len(caption_text.strip()) >= 20 else "Hoạt động mới tại NQH English"
+        seo_data = rewrite_with_groq(raw_text)
+
+        pending_set(user_id, {
+            "seo_data":           seo_data,
+            "image_bytes":        main_image,
+            "extra_images_bytes": extra_images,
+            "image_url":          "",
+            "source":             "Ảnh Telegram",
+        })
+
+        preview = build_preview_text(seo_data, has_image=True, extra_images=len(extra_images))
+        await msg.edit_text(preview, parse_mode="Markdown", reply_markup=build_keyboard(user_id))
+
+    except Exception as e:
+        logger.error(f"process_album_job error: {e}", exc_info=True)
+        await msg.edit_text(f"❌ Lỗi xử lý album: `{str(e)[:200]}`", parse_mode="Markdown")
+
+# ============================================================
 # XỬ LÝ ẢNH (hỗ trợ nhiều ảnh trong album)
 # ============================================================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -687,45 +739,49 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await photo_file.download_to_memory(photo_bytes_io)
         image_bytes = photo_bytes_io.getvalue()
 
-        # Kiểm tra nếu đây là album (media group) — thêm vào buffer
+        # Kiểm tra nếu đây là album (media group) — gom ảnh rồi xử lý 1 lần
         if media_group_id:
             album_key = f"album_{user_id}_{media_group_id}"
             if "album_buffer" not in context.bot_data:
                 context.bot_data["album_buffer"] = {}
             buf = context.bot_data["album_buffer"]
 
+            # Khởi tạo buffer cho album này
             if album_key not in buf:
-                buf[album_key] = {"images": [], "caption": caption, "msg_id": msg.message_id}
+                buf[album_key] = {
+                    "images":   [],
+                    "caption":  caption,
+                    "user_id":  user_id,
+                    "msg_id":   msg.message_id,
+                }
+                # Xoá tin nhắn "Đang tải ảnh..." ngay (sẽ gửi lại sau khi gom đủ)
+                await msg.delete()
+            else:
+                # Ảnh tiếp theo trong album — xoá tin nhắn thừa
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+
+            # Thêm ảnh vào buffer
             buf[album_key]["images"].append(image_bytes)
             if caption:
                 buf[album_key]["caption"] = caption
 
-            # Đợi ảnh tiếp theo (album chưa xong)
-            import asyncio
-            await asyncio.sleep(2)
+            # Huỷ job cũ nếu có, đặt job mới chờ 3 giây
+            job_name = f"process_album_{album_key}"
+            current_jobs = context.job_queue.get_jobs_by_name(job_name)
+            for job in current_jobs:
+                job.schedule_removal()
 
-            # Kiểm tra album đã đủ chưa (dùng job queue)
-            if album_key in buf and len(buf[album_key]["images"]) > 0:
-                all_images = buf[album_key]["images"]
-                caption_text = buf[album_key]["caption"]
-                buf.pop(album_key, None)
-
-                main_image = all_images[0]
-                extra_images = all_images[1:] if len(all_images) > 1 else []
-
-                raw_text = caption_text.strip() if len(caption_text.strip()) >= 20 else "Hoạt động mới tại NQH English"
-                await msg.edit_text(f"⚡ Groq AI đang viết bài từ {len(all_images)} ảnh...")
-                seo_data = rewrite_with_groq(raw_text)
-
-                pending_set(user_id, {
-                    "seo_data":          seo_data,
-                    "image_bytes":       main_image,
-                    "extra_images_bytes": extra_images,
-                    "image_url":         "",
-                    "source":            "Ảnh Telegram",
-                })
-                preview = build_preview_text(seo_data, has_image=True, extra_images=len(extra_images))
-                await msg.edit_text(preview, parse_mode="Markdown", reply_markup=build_keyboard(user_id))
+            context.job_queue.run_once(
+                process_album_job,
+                when=3,
+                name=job_name,
+                data={"album_key": album_key, "bot_data": context.bot_data},
+                chat_id=update.effective_chat.id,
+                user_id=user_id,
+            )
             return
 
         # Ảnh đơn
