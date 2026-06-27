@@ -1,13 +1,11 @@
 """
 Telegram Bot: Facebook → Groq AI SEO → WordPress
-Phiên bản: 5.0
-- Gửi ảnh + caption  → viết bài + thumbnail + ảnh giữa bài
-- Gửi link Facebook  → scrape + viết bài chuẩn SEO 2026
-- Gửi text thuần    → viết bài từ nội dung
-- Nhắn yêu cầu chỉnh sau preview → bot viết lại theo yêu cầu
-- Dữ liệu bền vững qua restart (lưu file JSON)
-- Hệ thống dạy AI: /teach, /rules, /delrule
-- Ảnh được chèn tự động giữa các đoạn trong bài
+Phiên bản: 6.0
+- Upload nhiều ảnh: ảnh 1 = thumbnail, ảnh 2+ chèn vào trong bài
+- Bố cục bài: H2 xen kẽ ảnh minh họa
+- SEO 2026 đầy đủ: Technical SEO, E-E-A-T, Search Intent, On-page
+- Dạy bot quy tắc riêng, nhớ vĩnh viễn
+- Dữ liệu bền vững qua restart
 """
 
 import os
@@ -25,13 +23,7 @@ from telegram.ext import (
 from bs4 import BeautifulSoup
 from groq import Groq
 
-# ============================================================
-# LOGGING
-# ============================================================
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -48,13 +40,132 @@ GROQ_MODEL       = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ============================================================
-# FILE PATHS
+# FILE LƯU TRỮ
 # ============================================================
-PENDING_FILE = "/tmp/pending_posts.json"
-RULES_FILE   = "/tmp/ai_rules.json"
+PENDING_FILE      = "/tmp/pending_posts.json"
+RULES_FILE        = "/tmp/bot_rules.json"
+MEDIA_GROUP_FILE  = "/tmp/media_groups.json"  # gom nhóm ảnh album
 
 # ============================================================
-# LƯU TRỮ BỀN VỮNG - PENDING POSTS
+# CHUẨN SEO 2026 - TÍCH HỢP SẴN
+# ============================================================
+SEO_2026_BASE = """
+CHUẨN SEO 2026 BẮT BUỘC ÁP DỤNG:
+
+1. E-E-A-T (Experience, Expertise, Authoritativeness, Trustworthiness):
+   - Thể hiện trải nghiệm thực tế, đưa ví dụ và số liệu cụ thể
+   - Nội dung đáng tin cậy, không phóng đại, thể hiện chuyên môn
+   - Viết như một chuyên gia thực sự trong lĩnh vực
+
+2. Search Intent - Đáp ứng đúng ý định tìm kiếm:
+   - Xác định rõ người đọc muốn gì: thông tin, hướng dẫn, hay so sánh
+   - Giải quyết đúng và đủ vấn đề người đọc quan tâm
+   - Không viết lan man, mỗi đoạn phải có giá trị rõ ràng
+
+3. Information Gain - Giá trị thực sự:
+   - Không viết lại những gì bài khác đã có
+   - Đưa góc nhìn mới, ví dụ thực tế, case study
+   - Câu trả lời trực tiếp, cô đọng trước - giải thích sau
+
+4. Tối ưu cho AI Search (Google AI Overview, ChatGPT, Perplexity):
+   - Định nghĩa ngắn gọn ở phần mở đầu để AI dễ trích dẫn
+   - Cấu trúc H2/H3 logic, mỗi heading là 1 câu hỏi hoặc chủ đề rõ ràng
+   - Dùng danh sách (bullet/số) cho thông tin liệt kê
+
+5. Kỹ thuật On-page:
+   - H1 (tiêu đề): 55-65 ký tự, chứa từ khóa chính, hấp dẫn người click
+   - Meta description: 150-160 ký tự, chứa từ khóa, thôi thúc click
+   - Đoạn văn ngắn 3-4 dòng, dễ scan trên mobile
+   - Internal link: gợi ý các chủ đề liên quan trong bài
+
+6. Trải nghiệm người dùng (UX):
+   - Viết cho con người đọc trước, máy tính sau
+   - Nội dung tự nhiên, không nhồi từ khóa (Keyword Stuffing)
+   - Tránh Thin Content - bài phải giải quyết được vấn đề người đọc
+   - Đoạn mở đầu phải hook ngay từ câu đầu tiên
+
+7. Technical SEO (áp dụng khi viết HTML):
+   - Dùng thẻ HTML chuẩn: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>
+   - Mỗi ảnh phải có alt text mô tả nội dung tự nhiên
+   - Cấu trúc logic: Mở bài → Nội dung chính → Kết luận
+"""
+
+# ============================================================
+# QUẢN LÝ RULES - Bộ nhớ học tập
+# ============================================================
+def rules_load() -> list:
+    try:
+        with open(RULES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def rules_save(rules: list):
+    try:
+        with open(RULES_FILE, "w", encoding="utf-8") as f:
+            json.dump(rules, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Lỗi lưu rules: {e}")
+
+def rules_add(rule: str) -> int:
+    rules  = rules_load()
+    new_id = max([r["id"] for r in rules], default=0) + 1
+    rules.append({"id": new_id, "rule": rule})
+    rules_save(rules)
+    return new_id
+
+def rules_delete(rule_id: int) -> bool:
+    rules     = rules_load()
+    new_rules = [r for r in rules if r["id"] != rule_id]
+    if len(new_rules) == len(rules):
+        return False
+    rules_save(new_rules)
+    return True
+
+def rules_to_prompt() -> str:
+    rules = rules_load()
+    if not rules:
+        return ""
+    lines = "\n".join([f"- [{r['id']}] {r['rule']}" for r in rules])
+    return f"\nQUY TẮC RIÊNG CỦA NQH ENGLISH (bắt buộc tuân theo):\n{lines}\n"
+
+# ============================================================
+# QUẢN LÝ MEDIA GROUPS (gom nhóm ảnh album Telegram)
+# ============================================================
+def mg_load() -> dict:
+    try:
+        with open(MEDIA_GROUP_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def mg_save(data: dict):
+    try:
+        with open(MEDIA_GROUP_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Lỗi lưu media_group: {e}")
+
+def mg_add_photo(group_id: str, file_id: str, caption: str = ""):
+    data = mg_load()
+    if group_id not in data:
+        data[group_id] = {"photos": [], "caption": caption}
+    if caption and not data[group_id]["caption"]:
+        data[group_id]["caption"] = caption
+    if file_id not in data[group_id]["photos"]:
+        data[group_id]["photos"].append(file_id)
+    mg_save(data)
+
+def mg_get(group_id: str) -> dict | None:
+    return mg_load().get(group_id)
+
+def mg_delete(group_id: str):
+    data = mg_load()
+    data.pop(group_id, None)
+    mg_save(data)
+
+# ============================================================
+# PENDING POSTS - Bền vững qua restart
 # ============================================================
 def _load_pending() -> dict:
     try:
@@ -71,45 +182,31 @@ def _save_pending(data: dict):
         logger.error(f"Lỗi lưu pending: {e}")
 
 def pending_set(user_id: int, value: dict):
-    data = _load_pending()
+    data  = _load_pending()
     entry = {**value}
-    # Encode danh sách ảnh bytes (nếu có)
-    if entry.get("image_bytes") and isinstance(entry["image_bytes"], (bytes, bytearray)):
-        entry["image_bytes"] = base64.b64encode(entry["image_bytes"]).decode()
-    if entry.get("extra_images_bytes"):
-        encoded = []
-        for img in entry["extra_images_bytes"]:
-            if isinstance(img, (bytes, bytearray)):
-                encoded.append(base64.b64encode(img).decode())
-            else:
-                encoded.append(img)
-        entry["extra_images_bytes"] = encoded
+    # Encode danh sách ảnh bytes → base64
+    if entry.get("images_bytes"):
+        entry["images_bytes"] = [
+            base64.b64encode(b).decode() if isinstance(b, (bytes, bytearray)) else b
+            for b in entry["images_bytes"]
+        ]
     data[str(user_id)] = entry
     _save_pending(data)
 
 def pending_get(user_id: int) -> dict | None:
-    data = _load_pending()
+    data  = _load_pending()
     entry = data.get(str(user_id))
     if not entry:
         return None
-    # Decode ảnh chính
-    if entry.get("image_bytes") and isinstance(entry["image_bytes"], str):
-        try:
-            entry["image_bytes"] = base64.b64decode(entry["image_bytes"])
-        except Exception:
-            entry["image_bytes"] = None
-    # Decode ảnh phụ
-    if entry.get("extra_images_bytes"):
+    # Decode base64 → bytes
+    if entry.get("images_bytes"):
         decoded = []
-        for img in entry["extra_images_bytes"]:
-            if isinstance(img, str):
-                try:
-                    decoded.append(base64.b64decode(img))
-                except Exception:
-                    decoded.append(None)
-            else:
-                decoded.append(img)
-        entry["extra_images_bytes"] = decoded
+        for b in entry["images_bytes"]:
+            try:
+                decoded.append(base64.b64decode(b) if isinstance(b, str) else b)
+            except Exception:
+                decoded.append(None)
+        entry["images_bytes"] = decoded
     return entry
 
 def pending_update_seo(user_id: int, seo_data: dict):
@@ -124,45 +221,7 @@ def pending_delete(user_id: int):
     _save_pending(data)
 
 def pending_exists(user_id: int) -> bool:
-    data = _load_pending()
-    return str(user_id) in data
-
-# ============================================================
-# LƯU TRỮ BỀN VỮNG - QUY TẮC AI (RULES)
-# ============================================================
-def rules_load() -> list:
-    try:
-        with open(RULES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-def rules_save(rules: list):
-    try:
-        with open(RULES_FILE, "w", encoding="utf-8") as f:
-            json.dump(rules, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Lỗi lưu rules: {e}")
-
-def rules_add(rule: str):
-    rules = rules_load()
-    rules.append(rule.strip())
-    rules_save(rules)
-
-def rules_delete(index: int) -> bool:
-    rules = rules_load()
-    if 0 <= index < len(rules):
-        rules.pop(index)
-        rules_save(rules)
-        return True
-    return False
-
-def rules_get_as_text() -> str:
-    rules = rules_load()
-    if not rules:
-        return ""
-    lines = "\n".join(f"- {r}" for r in rules)
-    return f"\nQUY TẮC BỔ SUNG DO NGƯỜI DÙNG DẠY:\n{lines}"
+    return str(user_id) in _load_pending()
 
 # ============================================================
 # HELPER
@@ -182,50 +241,37 @@ def build_keyboard(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ Đăng lên WordPress", callback_data=f"publish_{user_id}"),
             InlineKeyboardButton("❌ Huỷ bỏ", callback_data=f"cancel_{user_id}"),
         ],
-        [
-            InlineKeyboardButton("🔄 Viết lại ngẫu nhiên", callback_data=f"rewrite_{user_id}"),
-        ],
+        [InlineKeyboardButton("🔄 Viết lại ngẫu nhiên", callback_data=f"rewrite_{user_id}")],
     ])
 
-def build_preview_text(seo_data: dict, has_image: bool = False, extra_images: int = 0) -> str:
+def build_preview_text(seo_data: dict, num_images: int = 0) -> str:
     from html.parser import HTMLParser
-    class TextExtractor(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.text = []
-        def handle_data(self, data):
-            self.text.append(data)
+    class TX(HTMLParser):
+        def __init__(self): super().__init__(); self.t = []
+        def handle_data(self, d): self.t.append(d)
+    tx = TX()
+    tx.feed(seo_data.get("content_html", ""))
+    plain = " ".join(tx.t)[:500]
 
-    extractor = TextExtractor()
-    extractor.feed(seo_data.get("content_html", ""))
-    plain_text = " ".join(extractor.text)[:600]
-
-    img_info = ""
-    if has_image and extra_images > 0:
-        img_info = f"✅ Thumbnail + {extra_images} ảnh trong bài"
-    elif has_image:
-        img_info = "✅ Có thumbnail"
-    else:
-        img_info = "❌ Không có ảnh"
-
-    word_count = len(" ".join(extractor.text).split())
+    rules     = rules_load()
+    img_note  = f"✅ {num_images} ảnh (1 thumbnail + {num_images-1} ảnh trong bài)" if num_images > 1 else ("✅ 1 ảnh thumbnail" if num_images == 1 else "❌ Không có ảnh")
 
     return (
-        f"📝 *PREVIEW BÀI VIẾT SEO 2026*\n"
-        f"{'━' * 30}\n\n"
-        f"🏷️ *Tiêu đề SEO:*\n{seo_data['seo_title']}\n\n"
-        f"📊 *Từ khóa chính:* `{seo_data.get('focus_keyword', 'N/A')}`\n\n"
-        f"📋 *Meta Description:*\n_{seo_data['meta_description']}_\n\n"
-        f"🏷️ *Tags:* {', '.join(seo_data.get('tags', []))}\n\n"
-        f"📂 *Danh mục:* {seo_data.get('category_suggestion', 'N/A')}\n\n"
-        f"🖼️ *Ảnh:* {img_info}\n\n"
-        f"📏 *Độ dài:* ~{word_count} từ\n\n"
-        f"{'━' * 30}\n"
-        f"📖 *Nội dung (rút gọn):*\n{plain_text}...\n\n"
-        f"{'━' * 30}\n"
-        f"💬 *Muốn chỉnh sửa?* Nhắn yêu cầu trực tiếp:\n"
-        f"_\"viết dài hơn\"_, _\"thêm emoji\"_, _\"tone vui hơn\"_...\n\n"
-        f"👇 Hoặc bấm nút bên dưới:"
+        f"📝 *PREVIEW BÀI VIẾT SEO*\n"
+        f"{'━'*30}\n\n"
+        f"🏷️ *Tiêu đề:*\n{seo_data['seo_title']}\n\n"
+        f"📊 *Từ khóa:* `{seo_data.get('focus_keyword','N/A')}`\n\n"
+        f"📋 *Meta:* _{seo_data['meta_description']}_\n\n"
+        f"🏷️ *Tags:* {', '.join(seo_data.get('tags',[]))}\n\n"
+        f"📂 *Danh mục:* {seo_data.get('category_suggestion','N/A')}\n\n"
+        f"🖼️ *Ảnh:* {img_note}\n\n"
+        f"📚 *Áp dụng:* {len(rules)} quy tắc riêng + SEO 2026\n\n"
+        f"{'━'*30}\n"
+        f"📖 *Nội dung (rút gọn):*\n{plain}...\n\n"
+        f"{'━'*30}\n"
+        f"💬 *Muốn chỉnh?* Nhắn yêu cầu trực tiếp:\n"
+        f"_\"viết ngắn hơn\"_, _\"thêm emoji\"_, _\"tone vui hơn\"_...\n\n"
+        f"👇 Hoặc bấm nút:"
     )
 
 # ============================================================
@@ -233,241 +279,191 @@ def build_preview_text(seo_data: dict, has_image: bool = False, extra_images: in
 # ============================================================
 def scrape_facebook_post(url: str) -> dict:
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "vi-VN,vi;q=0.9",
     }
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, "html.parser")
-
         og_title = og_desc = og_image = ""
+        for prop, var in [("og:title", "og_title"), ("og:description", "og_desc"), ("og:image", "og_image")]:
+            tag = soup.find("meta", property=prop)
+            if tag: locals()[var]; exec(f'{var} = tag.get("content", "")')
         og_t = soup.find("meta", property="og:title")
         og_d = soup.find("meta", property="og:description")
         og_i = soup.find("meta", property="og:image")
         if og_t: og_title = og_t.get("content", "")
         if og_d: og_desc  = og_d.get("content", "")
         if og_i: og_image = og_i.get("content", "")
-
         body_text = ""
         for tag in soup.find_all(["p", "div", "span"]):
             text = tag.get_text(separator=" ", strip=True)
             if len(text) > 100:
                 body_text += text + "\n\n"
-                if len(body_text) > 2000:
-                    break
-
+                if len(body_text) > 2000: break
         return {
             "title":     og_title or "Bài viết từ Facebook",
             "content":   og_desc or body_text[:2000] or "Không lấy được nội dung.",
-            "image_url": og_image,
-            "source":    url,
+            "image_url": og_image, "source": url,
         }
     except Exception as e:
         logger.error(f"Lỗi scrape: {e}")
         return {"title": "Bài viết từ Facebook", "content": "", "image_url": "", "source": url}
 
 # ============================================================
-# GROQ AI: Viết bài chuẩn SEO 2026
+# WORDPRESS: Upload ảnh
 # ============================================================
-def rewrite_with_groq(raw_content: str) -> dict:
-    custom_rules = rules_get_as_text()
-
-    system_prompt = (
-        "Bạn là chuyên gia SEO Content Writer người Việt Nam hàng đầu, "
-        "chuyên viết bài cho trung tâm tiếng Anh thiếu nhi NQH English. "
-        "Phong cách: thân thiện, vui tươi, gần gũi với phụ huynh và học sinh. "
-        "Bạn nắm vững chuẩn SEO 2026: E-E-A-T, AI Search Optimization, Search Intent. "
-        "Chỉ trả về JSON thuần túy, không markdown, không backtick, không text thêm."
-    )
-
-    user_prompt = f"""Viết lại thành bài blog chuẩn SEO 2026 cho website NQH English.
-
-NỘI DUNG GỐC:
-{raw_content}
-
-TIÊU CHUẨN SEO 2026 BẮT BUỘC:
-1. TIÊU ĐỀ (60-70 ký tự): Chứa từ khóa chính, hấp dẫn, kích thích click
-2. META DESCRIPTION (150-160 ký tự): Tóm tắt giá trị bài viết, có từ khóa
-3. CẤU TRÚC BÀI VIẾT:
-   - Mở bài: 2-3 câu hook mạnh, đặt vấn đề, có từ khóa chính tự nhiên
-   - Thân bài: 3-4 mục H2, mỗi mục có 2-3 đoạn <p>, dùng <ul>/<li> khi liệt kê
-   - Kết bài: Tóm lại giá trị, khuyến khích tương tác
-4. ĐỘ DÀI: Tối thiểu 700 từ, tối đa 1200 từ
-5. E-E-A-T: Thể hiện kinh nghiệm thực tế, trích dẫn lợi ích cụ thể
-6. TỪ KHÓA: Xuất hiện tự nhiên ở H2, đoạn đầu, đoạn cuối — KHÔNG nhồi nhét
-7. ĐẶT [IMAGE_PLACEHOLDER] giữa bài: Sau mỗi 2 mục H2 hãy chèn dòng [IMAGE_PLACEHOLDER] — đây là vị trí để chèn ảnh vào giữa bài
-8. ĐỊNH DẠNG: Câu ngắn, đoạn 3-4 câu, dễ đọc trên mobile
-9. Tone thân thiện, vui tươi, truyền cảm hứng học tiếng Anh
-10. Tự nhiên nhắc "NQH English" 1-2 lần trong bài{custom_rules}
-
-ĐỊNH DẠNG HTML (chỉ dùng các thẻ này):
-<h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>
-Và chuỗi [IMAGE_PLACEHOLDER] ở giữa bài (2-3 lần tùy độ dài)
-
-Trả về JSON (không thêm gì khác):
-{{
-  "seo_title": "...",
-  "meta_description": "...",
-  "focus_keyword": "...",
-  "content_html": "...",
-  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
-  "category_suggestion": "..."
-}}"""
-
-    return _call_groq(system_prompt, user_prompt)
-
-# ============================================================
-# GROQ AI: Chỉnh sửa bài theo yêu cầu người dùng
-# ============================================================
-def refine_with_groq(current_html: str, user_request: str, current_seo: dict) -> dict:
-    custom_rules = rules_get_as_text()
-
-    system_prompt = (
-        "Bạn là chuyên gia SEO Content Writer người Việt Nam cho NQH English. "
-        "Người dùng đang yêu cầu chỉnh sửa bài viết đã có. "
-        "Hãy thực hiện ĐÚNG yêu cầu chỉnh sửa, giữ nguyên thông tin cốt lõi. "
-        "Giữ lại các [IMAGE_PLACEHOLDER] ở vị trí hợp lý trong bài. "
-        "Chỉ trả về JSON thuần túy, không markdown, không backtick."
-    )
-
-    user_prompt = f"""Đây là bài viết hiện tại:
-
-TIÊU ĐỀ HIỆN TẠI: {current_seo.get('seo_title', '')}
-NỘI DUNG HTML HIỆN TẠI:
-{current_html}
-
-YÊU CẦU CHỈNH SỬA CỦA NGƯỜI DÙNG:
-"{user_request}"
-
-Hãy chỉnh sửa bài viết theo đúng yêu cầu trên. Giữ lại thông tin cốt lõi.
-Đảm bảo có 2-3 [IMAGE_PLACEHOLDER] ở giữa bài để chèn ảnh.{custom_rules}
-
-Trả về JSON (không thêm gì khác):
-{{
-  "seo_title": "...",
-  "meta_description": "...",
-  "focus_keyword": "...",
-  "content_html": "...",
-  "tags": ["tag1", "tag2", "tag3"],
-  "category_suggestion": "..."
-}}"""
-
-    return _call_groq(system_prompt, user_prompt)
-
-# ============================================================
-# GROQ: Gọi API chung
-# ============================================================
-def _call_groq(system_prompt: str, user_prompt: str) -> dict:
-    try:
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.7,
-            max_tokens=4000,
-        )
-        text = response.choices[0].message.content.strip()
-        text = re.sub(r"```json\s*", "", text)
-        text = re.sub(r"```\s*", "", text)
-        return json.loads(text)
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Groq JSON lỗi: {e}")
-        return {
-            "seo_title": "Bài viết NQH English",
-            "meta_description": "Nội dung từ NQH English.",
-            "focus_keyword": "",
-            "content_html": f"<p>{user_prompt[:200]}</p>",
-            "tags": [],
-            "category_suggestion": "Tin tức",
-        }
-    except Exception as e:
-        logger.error(f"Lỗi Groq AI: {e}")
-        raise
-
-# ============================================================
-# WORDPRESS: Upload ảnh bytes
-# ============================================================
-def upload_image_bytes_to_wordpress(image_bytes: bytes, filename: str = "image.jpg", content_type: str = "image/jpeg") -> int | None:
+def upload_image_bytes_to_wp(image_bytes: bytes, filename: str = "image.jpg", content_type: str = "image/jpeg") -> int | None:
     try:
         headers = {
             **get_wp_auth_header(),
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Type": content_type,
         }
-        resp = requests.post(
-            f"{WP_URL}/wp-json/wp/v2/media",
-            headers=headers,
-            data=image_bytes,
-            timeout=30,
-        )
+        resp = requests.post(f"{WP_URL}/wp-json/wp/v2/media", headers=headers, data=image_bytes, timeout=30)
         if resp.status_code in (200, 201):
-            media = resp.json()
-            logger.info(f"Upload ảnh OK, ID: {media.get('id')}, URL: {media.get('source_url')}")
-            return media.get("id"), media.get("source_url", "")
-        logger.error(f"Upload ảnh thất bại: {resp.status_code} {resp.text[:200]}")
+            data = resp.json()
+            logger.info(f"Upload ảnh OK: {data.get('id')} - {data.get('source_url','')}")
+            return data.get("id"), data.get("source_url", "")
+        logger.error(f"Upload ảnh lỗi: {resp.status_code}")
     except Exception as e:
-        logger.error(f"Lỗi upload ảnh: {e}")
+        logger.error(f"Lỗi upload: {e}")
     return None, None
 
-def upload_image_url_to_wordpress(image_url: str) -> tuple:
+def upload_image_url_to_wp(image_url: str) -> tuple:
     if not image_url:
         return None, None
     try:
-        img_resp = requests.get(image_url, timeout=15)
-        if img_resp.status_code != 200:
-            return None, None
-        content_type = img_resp.headers.get("Content-Type", "image/jpeg")
-        ext = "jpg" if "jpeg" in content_type else content_type.split("/")[-1]
-        return upload_image_bytes_to_wordpress(img_resp.content, f"fb-image.{ext}", content_type)
+        r = requests.get(image_url, timeout=15)
+        if r.status_code != 200: return None, None
+        ct  = r.headers.get("Content-Type", "image/jpeg")
+        ext = "jpg" if "jpeg" in ct else ct.split("/")[-1]
+        return upload_image_bytes_to_wp(r.content, f"fb-image.{ext}", ct)
     except Exception as e:
-        logger.error(f"Lỗi upload ảnh URL: {e}")
+        logger.error(f"Lỗi upload URL: {e}")
     return None, None
 
 # ============================================================
-# WORDPRESS: Chèn ảnh vào giữa bài (thay [IMAGE_PLACEHOLDER])
+# GROQ AI: Viết bài với placeholder ảnh
 # ============================================================
-def inject_images_into_content(content_html: str, image_urls: list) -> str:
-    """Thay [IMAGE_PLACEHOLDER] bằng thẻ <img> thực tế."""
-    if not image_urls:
-        # Xóa placeholder nếu không có ảnh
-        content_html = content_html.replace("[IMAGE_PLACEHOLDER]", "")
-        return content_html
+def rewrite_with_groq(raw_content: str, num_inline_images: int = 0) -> dict:
+    custom_rules   = rules_to_prompt()
+    image_instruct = ""
+    if num_inline_images > 0:
+        image_instruct = f"""
+QUAN TRỌNG - CHÈN ẢNH VÀO BÀI:
+Bài viết có {num_inline_images} ảnh minh họa sẽ được chèn vào trong bài.
+Hãy đặt placeholder {{{{IMAGE_1}}}}, {{{{IMAGE_2}}}}, ... (tối đa {num_inline_images} placeholder)
+tại các vị trí phù hợp trong content_html, sau mỗi đoạn H2 hoặc đoạn nội dung quan trọng.
+Ví dụ: <h2>Tiêu đề phần 1</h2><p>Nội dung...</p>{{{{IMAGE_1}}}}<h2>Tiêu đề phần 2</h2>...
+"""
 
-    idx = 0
-    for img_url in image_urls:
-        if "[IMAGE_PLACEHOLDER]" not in content_html:
-            break
-        img_tag = (
-            f'<figure class="wp-block-image size-large" style="text-align:center;margin:30px 0;">'
-            f'<img src="{img_url}" alt="NQH English" style="max-width:100%;border-radius:8px;" />'
-            f'</figure>'
+    system_prompt = (
+        "Bạn là chuyên gia SEO Content Writer người Việt Nam, "
+        "chuyên viết bài cho trung tâm tiếng Anh thiếu nhi NQH English. "
+        "Phong cách: thân thiện, vui tươi, gần gũi. "
+        "Chỉ trả về JSON thuần túy, không markdown, không backtick."
+    )
+
+    user_prompt = f"""Viết bài blog chuẩn SEO cho NQH English từ nội dung sau:
+
+NỘI DUNG GỐC:
+{raw_content}
+
+{SEO_2026_BASE}
+{custom_rules}
+{image_instruct}
+
+YÊU CẦU THÊM:
+- Tối thiểu 600 từ
+- Tone thân thiện, vui tươi, truyền cảm hứng học tiếng Anh
+- Emoji phù hợp, không quá nhiều
+- Đề cập "NQH English" 1-2 lần tự nhiên
+- KHÔNG copy y chang nội dung gốc
+- Mở đầu phải hook ngay từ câu đầu
+
+Trả về JSON:
+{{
+  "seo_title": "...",
+  "meta_description": "...",
+  "focus_keyword": "...",
+  "content_html": "...",
+  "tags": ["tag1","tag2","tag3"],
+  "category_suggestion": "..."
+}}"""
+
+    return _call_groq(system_prompt, user_prompt)
+
+def refine_with_groq(current_html: str, user_request: str, current_seo: dict) -> dict:
+    custom_rules  = rules_to_prompt()
+    system_prompt = (
+        "Bạn là chuyên gia SEO Content Writer cho NQH English. "
+        "Thực hiện ĐÚNG yêu cầu chỉnh sửa, giữ nguyên placeholder ảnh {{IMAGE_N}}. "
+        "Chỉ trả về JSON thuần túy."
+    )
+    user_prompt = f"""Bài hiện tại:
+TIÊU ĐỀ: {current_seo.get('seo_title','')}
+NỘI DUNG: {current_html}
+
+YÊU CẦU CHỈNH: "{user_request}"
+
+{SEO_2026_BASE}
+{custom_rules}
+
+Giữ nguyên {{{{IMAGE_N}}}} placeholder nếu có. Chỉ thay đổi những gì được yêu cầu.
+
+Trả về JSON:
+{{
+  "seo_title": "...",
+  "meta_description": "...",
+  "focus_keyword": "...",
+  "content_html": "...",
+  "tags": ["tag1","tag2","tag3"],
+  "category_suggestion": "..."
+}}"""
+    return _call_groq(system_prompt, user_prompt)
+
+def _call_groq(system_prompt: str, user_prompt: str) -> dict:
+    try:
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            temperature=0.7, max_tokens=3000,
         )
-        content_html = content_html.replace("[IMAGE_PLACEHOLDER]", img_tag, 1)
-        idx += 1
-
-    # Xóa placeholder còn thừa
-    content_html = content_html.replace("[IMAGE_PLACEHOLDER]", "")
-    return content_html
+        text = resp.choices[0].message.content.strip()
+        text = re.sub(r"```json\s*", "", text)
+        text = re.sub(r"```\s*",     "", text)
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON lỗi: {e}")
+        return {"seo_title": "Bài viết NQH English", "meta_description": "NQH English.", "focus_keyword": "",
+                "content_html": "<p>Lỗi tạo nội dung.</p>", "tags": [], "category_suggestion": "Tin tức"}
+    except Exception as e:
+        logger.error(f"Groq lỗi: {e}"); raise
 
 # ============================================================
-# WORDPRESS: Đăng bài
+# WORDPRESS: Đăng bài với ảnh chèn trong bài
 # ============================================================
-def post_to_wordpress(seo_data: dict, featured_media_id: int | None = None, extra_image_urls: list = None) -> dict:
+def post_to_wordpress(seo_data: dict, thumbnail_id: int | None, inline_image_urls: list) -> dict:
+    """
+    thumbnail_id: media ID ảnh đại diện
+    inline_image_urls: list URL ảnh đã upload để thay thế {IMAGE_N}
+    """
     headers = {**get_wp_auth_header(), "Content-Type": "application/json"}
 
-    # Chèn ảnh vào giữa bài nếu có
+    # Thay placeholder {IMAGE_N} bằng thẻ <img> thực
     content_html = seo_data["content_html"]
-    if extra_image_urls:
-        content_html = inject_images_into_content(content_html, extra_image_urls)
-    else:
-        content_html = content_html.replace("[IMAGE_PLACEHOLDER]", "")
+    for i, img_url in enumerate(inline_image_urls, start=1):
+        if img_url:
+            img_tag = (
+                f'<figure class="wp-block-image size-large">'
+                f'<img src="{img_url}" alt="{seo_data["seo_title"]} - hình {i}" '
+                f'class="wp-image" loading="lazy"/>'
+                f'</figure>'
+            )
+            content_html = content_html.replace(f"{{{{IMAGE_{i}}}}}", img_tag)
+    # Xoá placeholder thừa chưa được thay
+    content_html = re.sub(r"\{\{IMAGE_\d+\}\}", "", content_html)
 
     payload = {
         "title":   seo_data["seo_title"],
@@ -475,20 +471,16 @@ def post_to_wordpress(seo_data: dict, featured_media_id: int | None = None, extr
         "status":  "publish",
         "excerpt": seo_data["meta_description"],
     }
-    if featured_media_id:
-        payload["featured_media"] = featured_media_id
+    if thumbnail_id:
+        payload["featured_media"] = thumbnail_id
 
+    # Tags
     if seo_data.get("tags"):
         tag_ids = []
-        for tag_name in seo_data["tags"]:
-            tag_resp = requests.post(
-                f"{WP_URL}/wp-json/wp/v2/tags",
-                headers=headers,
-                json={"name": tag_name},
-                timeout=10,
-            )
-            if tag_resp.status_code in (200, 201):
-                tag_ids.append(tag_resp.json()["id"])
+        for name in seo_data["tags"]:
+            tr = requests.post(f"{WP_URL}/wp-json/wp/v2/tags", headers=headers, json={"name": name}, timeout=10)
+            if tr.status_code in (200, 201):
+                tag_ids.append(tr.json()["id"])
         if tag_ids:
             payload["tags"] = tag_ids
 
@@ -497,395 +489,317 @@ def post_to_wordpress(seo_data: dict, featured_media_id: int | None = None, extr
     return resp.json()
 
 # ============================================================
-# TELEGRAM HANDLERS - COMMANDS
+# TELEGRAM HANDLERS - LỆNH
 # ============================================================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        await update.message.reply_text("⛔ Bạn không có quyền dùng bot này.")
-        return
+    if not is_allowed(update.effective_user.id): return
     rules = rules_load()
-    rules_count = f"\n🧠 *AI đã được dạy {len(rules)} quy tắc tùy chỉnh*" if rules else ""
     await update.message.reply_text(
-        "👋 *Chào mừng đến với NQH English Bot v5.0!*\n\n"
-        "📌 *Cách tạo bài:*\n"
-        "1️⃣ Gửi *ảnh + caption* → thumbnail + ảnh chèn giữa bài\n"
-        "2️⃣ Gửi *link Facebook* → scrape + viết chuẩn SEO 2026\n"
-        "3️⃣ Gửi *text* trực tiếp → viết bài từ nội dung\n\n"
-        "✏️ *Chỉnh sửa sau preview:*\n"
-        "Nhắn thẳng yêu cầu, ví dụ: _\"viết ngắn hơn\"_, _\"thêm emoji\"_\n\n"
-        "🧠 *Dạy AI thông minh hơn:*\n"
-        "/teach — dạy AI quy tắc mới\n"
-        "/rules — xem quy tắc đã dạy\n"
-        "/delrule — xoá quy tắc\n\n"
-        f"⚡ Powered by Groq AI ({GROQ_MODEL}){rules_count}\n"
-        "📎 /help để xem chi tiết",
+        "👋 *NQH English Bot v6.0*\n\n"
+        "📸 *Gửi ảnh:*\n"
+        "• 1 ảnh + caption → thumbnail + viết bài\n"
+        "• Nhiều ảnh (album) + caption → ảnh 1 làm thumbnail, ảnh còn lại chèn trong bài\n\n"
+        "📝 *Gửi nội dung:*\n"
+        "• Link Facebook → scrape + viết bài\n"
+        "• Text → viết bài từ nội dung\n\n"
+        "✏️ *Sau preview:* nhắn yêu cầu chỉnh trực tiếp\n\n"
+        "🧠 *Dạy bot:*\n"
+        "/teach [quy tắc] — Bot nhớ mãi\n"
+        "/rules — Xem quy tắc\n"
+        "/delrule [id] — Xoá quy tắc\n\n"
+        f"📚 *{len(rules)} quy tắc riêng* + SEO 2026\n"
+        "/help để xem đầy đủ",
         parse_mode="Markdown"
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 *Danh sách lệnh:*\n\n"
-        "/start — Khởi động bot\n"
-        "/help — Hướng dẫn\n"
-        "/status — Kiểm tra kết nối WordPress\n"
-        "/model — Xem model Groq đang dùng\n"
+        "📚 *Lệnh đầy đủ:*\n\n"
+        "*Bài viết:*\n"
+        "/status — Kiểm tra WP\n"
+        "/model — Model Groq\n"
         "/cancel — Huỷ bài đang soạn\n\n"
-        "🧠 *Dạy AI thông minh hơn:*\n"
-        "/teach [quy tắc] — Dạy AI một quy tắc mới\n"
-        "Ví dụ: `/teach Luôn đề cập lớp học thứ 7, CN`\n"
-        "Ví dụ: `/teach Không dùng từ 'tuyệt vời', thay bằng từ khác`\n"
-        "Ví dụ: `/teach Bài viết luôn hướng đến phụ huynh có con 5-12 tuổi`\n\n"
-        "/rules — Xem tất cả quy tắc đã dạy\n"
-        "/delrule [số] — Xoá quy tắc theo số thứ tự\n\n"
-        "💡 *Chỉnh sửa bài sau preview:*\n"
-        "Nhắn trực tiếp:\n"
-        "• _\"viết dài hơn 800 từ\"_\n"
-        "• _\"thêm nhiều emoji hơn\"_\n"
-        "• _\"tone chuyên nghiệp hơn\"_\n"
-        "• _\"tập trung vào trẻ 6-10 tuổi\"_\n"
-        "• _\"đổi tiêu đề hấp dẫn hơn\"_\n\n"
-        "🖼️ *Ảnh trong bài:*\n"
-        "Gửi nhiều ảnh cùng lúc → bot tự chèn vào giữa bài",
+        "*Dạy bot:*\n"
+        "/teach [nội dung] — Dạy quy tắc mới\n"
+        "/rules — Xem tất cả quy tắc\n"
+        "/delrule [id] — Xoá quy tắc\n\n"
+        "*Ví dụ dạy bot:*\n"
+        "`/teach mở đầu bằng câu hỏi kích thích tò mò`\n"
+        "`/teach không dùng từ \"tuy nhiên\" hay \"bên cạnh đó\"`\n"
+        "`/teach mỗi bài có ít nhất 1 ví dụ thực tế`\n"
+        "`/teach câu ngắn, tối đa 20 từ mỗi câu`\n\n"
+        "*Gửi nhiều ảnh:*\n"
+        "Chọn nhiều ảnh → gửi dưới dạng album (Media Group)\n"
+        "Viết caption cho ảnh đầu tiên\n"
+        "Ảnh 1 → thumbnail, ảnh 2,3... → chèn trong bài",
         parse_mode="Markdown"
     )
 
-async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
+async def cmd_teach(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    rule_text = " ".join(context.args).strip()
+    if not rule_text:
+        await update.message.reply_text(
+            "⚠️ Cú pháp: `/teach [quy tắc]`\n\nVí dụ:\n"
+            "`/teach luôn mở đầu bằng câu hỏi kích thích tò mò`\n"
+            "`/teach không dùng từ \"tuy nhiên\"`",
+            parse_mode="Markdown"
+        )
         return
+    rule_id = rules_add(rule_text)
+    rules   = rules_load()
     await update.message.reply_text(
-        f"🤖 *Model Groq hiện tại:* `{GROQ_MODEL}`\n\n"
-        f"Các model khả dụng:\n"
+        f"✅ *Đã dạy bot quy tắc mới!*\n\n"
+        f"🆔 ID: `{rule_id}`\n"
+        f"📝 _{rule_text}_\n\n"
+        f"📚 Tổng: *{len(rules)} quy tắc riêng*\n"
+        f"Bot áp dụng ngay từ bài tiếp theo.",
+        parse_mode="Markdown"
+    )
+
+async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    rules = rules_load()
+    if not rules:
+        await update.message.reply_text("📭 Chưa có quy tắc riêng.\nDùng `/teach [quy tắc]`.", parse_mode="Markdown")
+        return
+    lines = "\n".join([f"*[{r['id']}]* _{r['rule']}_" for r in rules])
+    await update.message.reply_text(
+        f"📚 *Quy tắc riêng ({len(rules)}):*\n\n{lines}\n\n"
+        f"➕ `/teach [quy tắc]`\n🗑️ `/delrule [id]`\n\n"
+        f"_Bot luôn áp dụng SEO 2026 mặc định._",
+        parse_mode="Markdown"
+    )
+
+async def cmd_delrule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text("⚠️ `/delrule [id]` — Dùng /rules xem ID.", parse_mode="Markdown")
+        return
+    try:
+        rule_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ ID phải là số.", parse_mode="Markdown")
+        return
+    if rules_delete(rule_id):
+        await update.message.reply_text(f"🗑️ Đã xoá quy tắc `{rule_id}`. Còn *{len(rules_load())}* quy tắc.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"⚠️ Không tìm thấy ID `{rule_id}`.", parse_mode="Markdown")
+
+async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    await update.message.reply_text(
+        f"🤖 *Model:* `{GROQ_MODEL}`\n\nKhả dụng:\n"
         f"• `llama-3.1-8b-instant` — Siêu nhanh\n"
-        f"• `llama-3.3-70b-versatile` — Chất lượng cao ⭐\n"
-        f"• `gemma2-9b-it` — Google Gemma 2\n"
-        f"• `mixtral-8x7b-32768` — Context dài\n\n"
-        f"Đổi qua biến môi trường `GROQ_MODEL` trên Railway.",
+        f"• `llama-3.3-70b-versatile` — Chất lượng ⭐\n"
+        f"• `gemma2-9b-it` — Gemma 2\n"
+        f"• `mixtral-8x7b-32768` — Context dài",
         parse_mode="Markdown"
     )
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        return
-    await update.message.reply_text("🔍 Đang kiểm tra kết nối WordPress...")
+    if not is_allowed(update.effective_user.id): return
+    await update.message.reply_text("🔍 Kiểm tra WordPress...")
     try:
-        resp = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/posts?per_page=1",
-            headers=get_wp_auth_header(),
-            timeout=10,
-        )
-        rules = rules_load()
+        resp = requests.get(f"{WP_URL}/wp-json/wp/v2/posts?per_page=1", headers=get_wp_auth_header(), timeout=10)
         if resp.status_code == 200:
             await update.message.reply_text(
-                f"✅ *Kết nối WordPress thành công!*\n"
-                f"🌐 URL: `{WP_URL}`\n"
-                f"🤖 Model: `{GROQ_MODEL}`\n"
-                f"🧠 AI đã được dạy: `{len(rules)} quy tắc`",
+                f"✅ *WordPress OK!*\n🌐 `{WP_URL}`\n🤖 `{GROQ_MODEL}`\n📚 *{len(rules_load())}* quy tắc riêng",
                 parse_mode="Markdown"
             )
         else:
-            await update.message.reply_text(f"❌ Lỗi kết nối: HTTP {resp.status_code}\nKiểm tra lại WP_URL và APP_PASSWORD")
+            await update.message.reply_text(f"❌ HTTP {resp.status_code}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Không kết nối được: {e}")
+        await update.message.reply_text(f"❌ {e}")
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if pending_exists(user_id):
         pending_delete(user_id)
-        await update.message.reply_text("❌ Đã huỷ bài đang soạn. Gửi nội dung mới để bắt đầu lại.")
+        await update.message.reply_text("❌ Đã huỷ. Gửi nội dung mới để bắt đầu.")
     else:
         await update.message.reply_text("ℹ️ Không có bài nào đang soạn.")
 
 # ============================================================
-# COMMANDS - DẠY AI
-# ============================================================
-async def cmd_teach(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        return
-    rule = " ".join(context.args).strip() if context.args else ""
-    if not rule:
-        await update.message.reply_text(
-            "📝 *Cách dùng:* `/teach [quy tắc]`\n\n"
-            "Ví dụ:\n"
-            "`/teach Luôn đề cập đến lớp học thứ 7 và Chủ nhật`\n"
-            "`/teach Bài viết hướng đến phụ huynh có con 5-12 tuổi`\n"
-            "`/teach Không dùng từ 'tuyệt vời', dùng từ khác thay thế`\n"
-            "`/teach Mỗi bài phải có ít nhất 1 câu hỏi tương tác cuối bài`",
-            parse_mode="Markdown"
-        )
-        return
-    rules_add(rule)
-    rules = rules_load()
-    await update.message.reply_text(
-        f"✅ *Đã dạy AI quy tắc mới!*\n\n"
-        f"📌 Quy tắc #{len(rules)}: _{rule}_\n\n"
-        f"🧠 Tổng cộng: *{len(rules)} quy tắc* đã được lưu.\n"
-        f"AI sẽ áp dụng tất cả quy tắc này vào mọi bài viết từ bây giờ.",
-        parse_mode="Markdown"
-    )
-
-async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        return
-    rules = rules_load()
-    if not rules:
-        await update.message.reply_text(
-            "🧠 *Chưa có quy tắc nào được dạy.*\n\n"
-            "Dùng `/teach [quy tắc]` để dạy AI viết hay hơn!",
-            parse_mode="Markdown"
-        )
-        return
-    lines = "\n".join(f"{i+1}. {r}" for i, r in enumerate(rules))
-    await update.message.reply_text(
-        f"🧠 *Các quy tắc AI đã được dạy ({len(rules)} quy tắc):*\n\n"
-        f"{lines}\n\n"
-        f"Dùng `/delrule [số]` để xoá quy tắc.\n"
-        f"Dùng `/teach [quy tắc]` để thêm quy tắc mới.",
-        parse_mode="Markdown"
-    )
-
-async def cmd_delrule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        return
-    if not context.args:
-        await update.message.reply_text("Dùng: `/delrule [số thứ tự]`\nXem danh sách: /rules", parse_mode="Markdown")
-        return
-    try:
-        idx = int(context.args[0]) - 1
-        rules = rules_load()
-        if 0 <= idx < len(rules):
-            deleted = rules[idx]
-            rules_delete(idx)
-            await update.message.reply_text(
-                f"🗑️ Đã xoá quy tắc #{idx+1}:\n_{deleted}_\n\n"
-                f"Còn lại {len(rules)-1} quy tắc.",
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text(f"❌ Không tìm thấy quy tắc #{idx+1}. Dùng /rules để xem danh sách.")
-    except ValueError:
-        await update.message.reply_text("❌ Vui lòng nhập số thứ tự. Ví dụ: `/delrule 2`", parse_mode="Markdown")
-
-# ============================================================
-# JOB: XỬ LÝ ALBUM SAU KHI ĐÃ GOM ĐỦ ẢNH
-# ============================================================
-async def process_album_job(context):
-    """Chạy sau 3 giây kể từ ảnh cuối cùng — đảm bảo đã gom đủ toàn bộ album."""
-    job      = context.job
-    data     = job.data
-    album_key = data["album_key"]
-    bot_data  = data["bot_data"]
-    user_id   = job.user_id
-    chat_id   = job.chat_id
-
-    buf = bot_data.get("album_buffer", {})
-    if album_key not in buf:
-        return
-
-    album     = buf.pop(album_key)
-    all_images   = album["images"]
-    caption_text = album.get("caption", "")
-
-    if not all_images:
-        return
-
-    main_image   = all_images[0]
-    extra_images = all_images[1:]
-
-    logger.info(f"Album {album_key}: {len(all_images)} ảnh, {len(extra_images)} ảnh phụ")
-
-    msg = await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"🖼️ Đã nhận {len(all_images)} ảnh — Groq AI đang viết bài..."
-    )
-
-    try:
-        raw_text = caption_text.strip() if len(caption_text.strip()) >= 20 else "Hoạt động mới tại NQH English"
-        seo_data = rewrite_with_groq(raw_text)
-
-        pending_set(user_id, {
-            "seo_data":           seo_data,
-            "image_bytes":        main_image,
-            "extra_images_bytes": extra_images,
-            "image_url":          "",
-            "source":             "Ảnh Telegram",
-        })
-
-        preview = build_preview_text(seo_data, has_image=True, extra_images=len(extra_images))
-        await msg.edit_text(preview, parse_mode="Markdown", reply_markup=build_keyboard(user_id))
-
-    except Exception as e:
-        logger.error(f"process_album_job error: {e}", exc_info=True)
-        await msg.edit_text(f"❌ Lỗi xử lý album: `{str(e)[:200]}`", parse_mode="Markdown")
-
-# ============================================================
-# XỬ LÝ ẢNH (hỗ trợ nhiều ảnh trong album)
+# XỬ LÝ ẢNH (đơn lẻ hoặc album)
 # ============================================================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        await update.message.reply_text("⛔ Không có quyền truy cập.")
+    if not is_allowed(update.effective_user.id): return
+    user_id    = update.effective_user.id
+    message    = update.message
+    media_gid  = message.media_group_id  # None nếu ảnh đơn lẻ
+    caption    = message.caption or ""
+    photo_fid  = message.photo[-1].file_id
+
+    if media_gid:
+        # ── Album nhiều ảnh ──
+        mg_add_photo(str(media_gid), photo_fid, caption)
+
+        # Dùng job queue để xử lý sau khi nhận đủ ảnh (delay 2s)
+        job_name = f"mg_{media_gid}_{user_id}"
+        # Xoá job cũ nếu có
+        current_jobs = context.job_queue.get_jobs_by_name(job_name)
+        for job in current_jobs:
+            job.schedule_removal()
+
+        context.job_queue.run_once(
+            process_media_group,
+            when=2.5,
+            name=job_name,
+            data={"media_group_id": str(media_gid), "user_id": user_id, "chat_id": message.chat_id},
+        )
+    else:
+        # ── Ảnh đơn lẻ ──
+        msg = await message.reply_text("🖼️ Đang tải ảnh...")
+        try:
+            photo_file     = await context.bot.get_file(photo_fid)
+            photo_bytes_io = io.BytesIO()
+            await photo_file.download_to_memory(photo_bytes_io)
+            image_bytes = photo_bytes_io.getvalue()
+
+            raw_text = caption.strip() if len(caption.strip()) >= 20 else "Hoạt động mới tại NQH English"
+            rules    = rules_load()
+            await msg.edit_text(f"⚡ Groq AI viết bài...\n📚 {len(rules)} quy tắc + SEO 2026")
+            seo_data = rewrite_with_groq(raw_text, num_inline_images=0)
+
+            pending_set(user_id, {
+                "seo_data":    seo_data,
+                "images_bytes": [image_bytes],
+                "image_url":   "",
+                "source":      "Ảnh đơn Telegram",
+            })
+
+            preview = build_preview_text(seo_data, num_images=1)
+            await msg.edit_text(preview, parse_mode="Markdown", reply_markup=build_keyboard(user_id))
+        except Exception as e:
+            logger.error(f"handle_photo error: {e}", exc_info=True)
+            await msg.edit_text(f"❌ Lỗi: `{str(e)[:200]}`", parse_mode="Markdown")
+
+
+async def process_media_group(context):
+    """Job xử lý album ảnh sau khi đã nhận đủ."""
+    job_data   = context.job.data
+    mg_id      = job_data["media_group_id"]
+    user_id    = job_data["user_id"]
+    chat_id    = job_data["chat_id"]
+
+    group_info = mg_get(mg_id)
+    if not group_info:
         return
 
-    user_id = update.effective_user.id
-    caption = update.message.caption or ""
-    media_group_id = update.message.media_group_id
+    photo_ids = group_info["photos"]
+    caption   = group_info["caption"] or "Hoạt động mới tại NQH English"
+    mg_delete(mg_id)
 
-    msg = await update.message.reply_text("🖼️ Đang tải ảnh...")
+    msg = await context.bot.send_message(
+        chat_id,
+        f"📸 Nhận được *{len(photo_ids)} ảnh*. Đang tải và xử lý...",
+        parse_mode="Markdown"
+    )
 
     try:
-        # Tải ảnh hiện tại
-        photo = update.message.photo[-1]
-        photo_file = await context.bot.get_file(photo.file_id)
-        photo_bytes_io = io.BytesIO()
-        await photo_file.download_to_memory(photo_bytes_io)
-        image_bytes = photo_bytes_io.getvalue()
+        images_bytes = []
+        for fid in photo_ids:
+            pf  = await context.bot.get_file(fid)
+            buf = io.BytesIO()
+            await pf.download_to_memory(buf)
+            images_bytes.append(buf.getvalue())
 
-        # Kiểm tra nếu đây là album (media group) — gom ảnh rồi xử lý 1 lần
-        if media_group_id:
-            album_key = f"album_{user_id}_{media_group_id}"
-            if "album_buffer" not in context.bot_data:
-                context.bot_data["album_buffer"] = {}
-            buf = context.bot_data["album_buffer"]
+        num_inline = len(images_bytes) - 1  # ảnh 1 = thumbnail, còn lại chèn trong bài
+        rules      = rules_load()
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=msg.message_id,
+            text=f"⚡ Groq AI viết bài với {len(images_bytes)} ảnh...\n📚 {len(rules)} quy tắc + SEO 2026"
+        )
 
-            # Khởi tạo buffer cho album này
-            if album_key not in buf:
-                buf[album_key] = {
-                    "images":   [],
-                    "caption":  caption,
-                    "user_id":  user_id,
-                    "msg_id":   msg.message_id,
-                }
-                # Xoá tin nhắn "Đang tải ảnh..." ngay (sẽ gửi lại sau khi gom đủ)
-                await msg.delete()
-            else:
-                # Ảnh tiếp theo trong album — xoá tin nhắn thừa
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-
-            # Thêm ảnh vào buffer
-            buf[album_key]["images"].append(image_bytes)
-            if caption:
-                buf[album_key]["caption"] = caption
-
-            # Huỷ job cũ nếu có, đặt job mới chờ 3 giây
-            job_name = f"process_album_{album_key}"
-            current_jobs = context.job_queue.get_jobs_by_name(job_name)
-            for job in current_jobs:
-                job.schedule_removal()
-
-            context.job_queue.run_once(
-                process_album_job,
-                when=3,
-                name=job_name,
-                data={"album_key": album_key, "bot_data": context.bot_data},
-                chat_id=update.effective_chat.id,
-                user_id=user_id,
-            )
-            return
-
-        # Ảnh đơn
-        raw_text = caption.strip() if len(caption.strip()) >= 20 else "Hoạt động mới tại NQH English"
-        await msg.edit_text(f"⚡ Groq AI đang viết bài từ ảnh...")
-        seo_data = rewrite_with_groq(raw_text)
+        seo_data = rewrite_with_groq(caption, num_inline_images=num_inline)
 
         pending_set(user_id, {
-            "seo_data":          seo_data,
-            "image_bytes":       image_bytes,
-            "extra_images_bytes": [],
-            "image_url":         "",
-            "source":            "Ảnh Telegram",
+            "seo_data":     seo_data,
+            "images_bytes": images_bytes,
+            "image_url":    "",
+            "source":       f"Album {len(images_bytes)} ảnh Telegram",
         })
 
-        preview = build_preview_text(seo_data, has_image=True, extra_images=0)
-        await msg.edit_text(preview, parse_mode="Markdown", reply_markup=build_keyboard(user_id))
+        preview = build_preview_text(seo_data, num_images=len(images_bytes))
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=msg.message_id,
+            text=preview, parse_mode="Markdown",
+            reply_markup=build_keyboard(user_id)
+        )
 
     except Exception as e:
-        logger.error(f"handle_photo error: {e}", exc_info=True)
-        await msg.edit_text(f"❌ Lỗi: `{str(e)[:200]}`", parse_mode="Markdown")
+        logger.error(f"process_media_group error: {e}", exc_info=True)
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=msg.message_id,
+            text=f"❌ Lỗi: `{str(e)[:200]}`", parse_mode="Markdown"
+        )
 
 # ============================================================
 # XỬ LÝ TEXT
 # ============================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        await update.message.reply_text("⛔ Không có quyền truy cập.")
-        return
-
+    if not is_allowed(update.effective_user.id): return
     user_input = update.message.text.strip()
     user_id    = update.effective_user.id
 
-    # TRƯỜNG HỢP 1: Đang có bài pending → yêu cầu chỉnh sửa
+    # Đang có pending → chỉnh sửa
     if pending_exists(user_id):
-        post_info = pending_get(user_id)
-        is_fb_link = bool(re.match(r"https?://(www\.)?(facebook\.com|fb\.com|fb\.watch)/", user_input))
+        post_info      = pending_get(user_id)
+        is_fb_link     = bool(re.match(r"https?://(www\.)?(facebook\.com|fb\.com|fb\.watch)/", user_input))
         is_new_content = is_fb_link or len(user_input) > 200
 
         if not is_new_content:
             msg = await update.message.reply_text(
-                f"✏️ Đang chỉnh sửa theo yêu cầu:\n_\"{user_input}\"_\n\nVui lòng chờ...",
-                parse_mode="Markdown"
+                f"✏️ Đang chỉnh: _\"{user_input}\"_...", parse_mode="Markdown"
             )
             try:
-                current_seo  = post_info["seo_data"]
-                current_html = current_seo.get("content_html", "")
-                new_seo_data = refine_with_groq(current_html, user_input, current_seo)
-                pending_update_seo(user_id, new_seo_data)
-
-                has_image    = bool(post_info.get("image_bytes") or post_info.get("image_url"))
-                extra_count  = len(post_info.get("extra_images_bytes") or [])
-                preview      = build_preview_text(new_seo_data, has_image=has_image, extra_images=extra_count)
+                cur_seo      = post_info["seo_data"]
+                new_seo      = refine_with_groq(cur_seo.get("content_html",""), user_input, cur_seo)
+                pending_update_seo(user_id, new_seo)
+                num_img      = len(post_info.get("images_bytes") or [])
+                preview      = build_preview_text(new_seo, num_images=num_img)
                 await msg.edit_text(preview, parse_mode="Markdown", reply_markup=build_keyboard(user_id))
             except Exception as e:
-                logger.error(f"refine error: {e}", exc_info=True)
-                await msg.edit_text(f"❌ Lỗi chỉnh sửa: `{str(e)[:200]}`", parse_mode="Markdown")
+                await msg.edit_text(f"❌ Lỗi: `{str(e)[:200]}`", parse_mode="Markdown")
             return
-
         pending_delete(user_id)
 
-    # TRƯỜNG HỢP 2: Tạo bài mới
+    # Tạo bài mới
     is_fb_link = bool(re.match(r"https?://(www\.)?(facebook\.com|fb\.com|fb\.watch)/", user_input))
-    msg = await update.message.reply_text(
-        "🔍 Đang scrape bài Facebook..." if is_fb_link else "⏳ Đang xử lý nội dung..."
-    )
+    msg = await update.message.reply_text("🔍 Đang scrape..." if is_fb_link else "⏳ Đang xử lý...")
 
     try:
         if is_fb_link:
             scraped   = scrape_facebook_post(user_input)
             raw_text  = f"{scraped['title']}\n\n{scraped['content']}"
-            image_url = scraped.get("image_url", "")
+            image_url = scraped.get("image_url","")
         else:
             raw_text  = user_input
             image_url = ""
 
         if len(raw_text.strip()) < 50:
-            await msg.edit_text(
-                "⚠️ Không lấy được nội dung đủ dài.\n\n"
-                "📌 *Gợi ý:*\n"
-                "• Copy text bài viết và paste trực tiếp\n"
-                "• Hoặc gửi ảnh kèm caption",
-                parse_mode="Markdown"
-            )
+            await msg.edit_text("⚠️ Nội dung quá ngắn.\n• Paste text trực tiếp\n• Hoặc gửi ảnh kèm caption")
             return
 
-        await msg.edit_text(f"⚡ Groq AI ({GROQ_MODEL}) đang viết bài chuẩn SEO 2026...")
+        rules = rules_load()
+        await msg.edit_text(f"⚡ Groq AI viết bài...\n📚 {len(rules)} quy tắc + SEO 2026")
         seo_data = rewrite_with_groq(raw_text)
 
         pending_set(user_id, {
-            "seo_data":          seo_data,
-            "image_bytes":       None,
-            "extra_images_bytes": [],
-            "image_url":         image_url,
-            "source":            user_input if is_fb_link else "Text trực tiếp",
+            "seo_data":     seo_data,
+            "images_bytes": [],
+            "image_url":    image_url,
+            "source":       user_input if is_fb_link else "Text",
         })
 
-        has_image = bool(image_url)
-        preview   = build_preview_text(seo_data, has_image=has_image)
+        num_img = 1 if image_url else 0
+        preview = build_preview_text(seo_data, num_images=num_img)
         await msg.edit_text(preview, parse_mode="Markdown", reply_markup=build_keyboard(user_id))
 
     except Exception as e:
         logger.error(f"handle_message error: {e}", exc_info=True)
-        await msg.edit_text(f"❌ Lỗi: `{str(e)[:200]}`\n\nVui lòng thử lại.", parse_mode="Markdown")
+        await msg.edit_text(f"❌ Lỗi: `{str(e)[:200]}`", parse_mode="Markdown")
 
 # ============================================================
 # XỬ LÝ NÚT BẤM
@@ -898,91 +812,74 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("cancel_"):
         pending_delete(user_id)
-        await query.edit_message_text("❌ Đã huỷ. Gửi nội dung mới để bắt đầu lại.")
+        await query.edit_message_text("❌ Đã huỷ.")
 
     elif data.startswith("rewrite_"):
         post_info = pending_get(user_id)
         if not post_info:
-            await query.edit_message_text("⚠️ Không tìm thấy nội dung. Vui lòng gửi lại.")
+            await query.edit_message_text("⚠️ Không tìm thấy nội dung. Gửi lại.")
             return
-
-        await query.edit_message_text("🔄 Groq AI đang viết lại với phong cách khác...")
+        await query.edit_message_text("🔄 Viết lại với phong cách khác...")
         try:
-            raw      = post_info["seo_data"]["content_html"]
-            seo_data = rewrite_with_groq(f"[Viết lại theo phong cách khác, sáng tạo hơn]\n{raw}")
+            num_img  = len(post_info.get("images_bytes") or [])
+            num_inl  = max(0, num_img - 1)
+            raw      = f"[Viết lại phong cách khác, sáng tạo hơn]\n{post_info['seo_data']['content_html']}"
+            seo_data = rewrite_with_groq(raw, num_inline_images=num_inl)
             pending_update_seo(user_id, seo_data)
-            has_image   = bool(post_info.get("image_bytes") or post_info.get("image_url"))
-            extra_count = len(post_info.get("extra_images_bytes") or [])
-            preview     = build_preview_text(seo_data, has_image=has_image, extra_images=extra_count)
+            preview = build_preview_text(seo_data, num_images=num_img)
             await query.edit_message_text(preview, parse_mode="Markdown", reply_markup=build_keyboard(user_id))
         except Exception as e:
-            await query.edit_message_text(f"❌ Lỗi viết lại: {e}")
+            await query.edit_message_text(f"❌ Lỗi: {e}")
 
     elif data.startswith("publish_"):
         post_info = pending_get(user_id)
         if not post_info:
-            await query.edit_message_text("⚠️ Không tìm thấy nội dung. Vui lòng gửi lại.")
+            await query.edit_message_text("⚠️ Không tìm thấy nội dung. Gửi lại.")
             return
 
-        await query.edit_message_text("📤 Đang đăng bài lên WordPress...")
+        await query.edit_message_text("📤 Đang đăng bài...")
         try:
-            featured_media_id = None
-            extra_image_urls  = []
+            images_bytes = post_info.get("images_bytes") or []
+            thumbnail_id = None
+            inline_urls  = []
 
-            # Upload ảnh thumbnail chính
-            if post_info.get("image_bytes"):
-                await query.edit_message_text("🖼️ Đang upload thumbnail lên WordPress...")
-                media_id, media_url = upload_image_bytes_to_wordpress(
-                    post_info["image_bytes"], "telegram-image.jpg", "image/jpeg"
-                )
-                featured_media_id = media_id
-
-                # Upload ảnh phụ (chèn giữa bài)
-                extra_imgs = post_info.get("extra_images_bytes") or []
-                if extra_imgs:
-                    await query.edit_message_text(f"🖼️ Đang upload {len(extra_imgs)} ảnh cho bài...")
-                    for i, img_bytes in enumerate(extra_imgs):
-                        if img_bytes:
-                            _, img_url = upload_image_bytes_to_wordpress(
-                                img_bytes, f"inline-image-{i+1}.jpg", "image/jpeg"
-                            )
-                            if img_url:
-                                extra_image_urls.append(img_url)
+            if images_bytes:
+                total = len(images_bytes)
+                for i, img_bytes in enumerate(images_bytes):
+                    if img_bytes is None:
+                        continue
+                    await query.edit_message_text(f"🖼️ Đang upload ảnh {i+1}/{total}...")
+                    mid, murl = upload_image_bytes_to_wp(img_bytes, f"nqh-image-{i+1}.jpg", "image/jpeg")
+                    if i == 0:
+                        thumbnail_id = mid  # Ảnh đầu → thumbnail
+                    else:
+                        inline_urls.append(murl)  # Ảnh còn lại → chèn trong bài
 
             elif post_info.get("image_url"):
-                await query.edit_message_text("🖼️ Đang upload ảnh từ Facebook...")
-                featured_media_id, _ = upload_image_url_to_wordpress(post_info["image_url"])
+                await query.edit_message_text("🖼️ Upload ảnh Facebook...")
+                thumbnail_id, _ = upload_image_url_to_wp(post_info["image_url"])
 
-            await query.edit_message_text("📝 Đang đăng bài chuẩn SEO 2026...")
-            result   = post_to_wordpress(post_info["seo_data"], featured_media_id, extra_image_urls)
-            post_url = result.get("link", "")
-            post_id  = result.get("id", "")
+            await query.edit_message_text("📝 Đang đăng bài lên WordPress...")
+            result   = post_to_wordpress(post_info["seo_data"], thumbnail_id, inline_urls)
+            post_url = result.get("link","")
+            post_id  = result.get("id","")
             edit_url = f"{WP_URL}/wp-admin/post.php?post={post_id}&action=edit"
 
             pending_delete(user_id)
 
-            img_info = "❌ Không có"
-            if featured_media_id and extra_image_urls:
-                img_info = f"✅ Thumbnail + {len(extra_image_urls)} ảnh trong bài"
-            elif featured_media_id:
-                img_info = "✅ Thumbnail"
-
+            total_imgs = len(images_bytes) if images_bytes else (1 if post_info.get("image_url") else 0)
             await query.edit_message_text(
                 f"🎉 *Đăng bài thành công!*\n\n"
                 f"📌 *Tiêu đề:* {post_info['seo_data']['seo_title']}\n"
-                f"🖼️ *Ảnh:* {img_info}\n"
+                f"🖼️ *Ảnh:* {'✅ ' + str(total_imgs) + ' ảnh đã upload' if total_imgs else '❌ Không có'}\n"
                 f"🔗 *Xem bài:* [Nhấn vào đây]({post_url})\n"
                 f"✏️ *Chỉnh sửa:* [WP Admin]({edit_url})\n\n"
-                f"⚡ *Powered by Groq AI* (`{GROQ_MODEL}`)",
-                parse_mode="Markdown",
-                disable_web_page_preview=False,
+                f"⚡ *Groq AI* `{GROQ_MODEL}`",
+                parse_mode="Markdown", disable_web_page_preview=False,
             )
         except Exception as e:
             logger.error(f"Publish error: {e}", exc_info=True)
-            await query.edit_message_text(
-                f"❌ Lỗi đăng bài: `{str(e)[:300]}`\n\nKiểm tra lại cấu hình WordPress.",
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text(f"❌ Lỗi đăng bài: `{str(e)[:300]}`", parse_mode="Markdown")
 
 # ============================================================
 # MAIN
@@ -1002,7 +899,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    logger.info(f"🤖 NQH English Bot v5.0 | Groq: {GROQ_MODEL}")
+    logger.info(f"🤖 NQH English Bot v6.0 | {GROQ_MODEL}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
