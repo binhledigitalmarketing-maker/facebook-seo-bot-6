@@ -318,7 +318,7 @@ async def process_photos(bot, chat_id:int, user_id:int, file_ids:list, caption:s
             text=f"⚡ Groq AI viết bài ({len(images_bytes)} ảnh)...\n📚 {len(r)} quy tắc + SEO 2026"
         )
 
-        seo = write_post(raw_text, n_inline_images=n_inline)
+        seo = write_post(raw_text, n_inline=n_inline)
 
         pending_set(user_id,{
             "seo_data":     seo,
@@ -444,7 +444,7 @@ async def handle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             ni=max(0,len(pi.get("images_bytes") or [])-1)
             raw=f"[Viết lại phong cách khác, sáng tạo hơn]\n{pi['seo_data']['content_html']}"
-            seo=write_post(raw,n_inline_images=ni)
+            seo=write_post(raw,n_inline=ni)
             pending_upd(uid,seo)
             nim=len(pi.get("images_bytes") or [])
             await q.edit_message_text(preview_text(seo,n_img=nim),parse_mode="Markdown",reply_markup=keyboard(uid))
