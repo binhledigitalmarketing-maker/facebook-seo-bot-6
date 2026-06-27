@@ -1,9 +1,9 @@
 """
-NQH English Bot v7.0
-- 1 ảnh đơn hoặc nhiều ảnh album đều hoạt động
-- Không dùng job-queue (tránh lỗi Railway)
-- Dùng asyncio.sleep để gom album ảnh
-- SEO 2026 đầy đủ + dạy bot quy tắc riêng
+NQH English Bot v7.1
+- Fix: Groq lỗi hiển thị rõ lý do
+- Fix: album nhiều ảnh gửi cùng lúc
+- Fix: preview luôn hiện nội dung
+- Fix: retry khi Groq trả về nội dung lỗi
 """
 
 import os, re, json, logging, requests, base64, io, asyncio
@@ -98,7 +98,14 @@ def mg_save(d):
 
 def mg_add(gid:str, fid:str, caption:str=""):
     d=mg_load()
-    if gid not in d: d[gid]={"photos":[],"caption":""}
+    if gid not in d: d[gid]={"photos":[],"caption":"","chat_id":None,"user_id":None}
+    if caption and not d[gid]["caption"]: d[gid]["caption"]=caption
+    if fid not in d[gid]["photos"]: d[gid]["photos"].append(fid)
+    mg_save(d)
+
+def mg_add_full(gid:str, fid:str, caption:str, chat_id:int, user_id:int):
+    d=mg_load()
+    if gid not in d: d[gid]={"photos":[],"caption":"","chat_id":chat_id,"user_id":user_id}
     if caption and not d[gid]["caption"]: d[gid]["caption"]=caption
     if fid not in d[gid]["photos"]: d[gid]["photos"].append(fid)
     mg_save(d)
@@ -167,6 +174,8 @@ def preview_text(seo:dict, n_img:int=0)->str:
     img_note=(f"✅ {n_img} ảnh (thumbnail + {n_img-1} trong bài)" if n_img>1
               else ("✅ 1 ảnh thumbnail" if n_img==1 else "❌ Không có"))
     r=rules_load()
+    # Kiểm tra nội dung có bị lỗi không
+    content_preview = plain if plain and "Lỗi tạo nội dung" not in plain else "⚠️ Nội dung chưa được tạo"
     return (
         f"📝 *PREVIEW BÀI VIẾT*\n{'━'*28}\n\n"
         f"🏷️ *Tiêu đề:* {seo['seo_title']}\n\n"
@@ -175,7 +184,7 @@ def preview_text(seo:dict, n_img:int=0)->str:
         f"🏷️ *Tags:* {', '.join(seo.get('tags',[]))}\n\n"
         f"🖼️ *Ảnh:* {img_note}\n"
         f"📚 *{len(r)} quy tắc riêng* + SEO 2026\n\n"
-        f"{'━'*28}\n📖 *Nội dung:*\n{plain}...\n\n"
+        f"{'━'*28}\n📖 *Nội dung:*\n{content_preview}...\n\n"
         f"{'━'*28}\n"
         f"💬 Nhắn yêu cầu chỉnh trực tiếp:\n"
         f"_\"viết ngắn hơn\"_, _\"thêm emoji\"_, _\"tone vui hơn\"_\n\n"
@@ -206,6 +215,7 @@ def scrape_fb(url:str)->dict:
 # GROQ AI
 # ============================================================
 def _groq(sys_p:str, usr_p:str)->dict:
+    """Gọi Groq, luôn trả về dict (không raise). Nếu lỗi trả về dict có error_msg."""
     try:
         r=groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -213,35 +223,54 @@ def _groq(sys_p:str, usr_p:str)->dict:
             temperature=0.7, max_tokens=3000
         )
         t=r.choices[0].message.content.strip()
+        # Làm sạch markdown code block nếu có
         t=re.sub(r"```json\s*","",t); t=re.sub(r"```\s*","",t)
+        # Tìm JSON object trong response nếu có text thừa
+        m=re.search(r'\{.*\}',t,re.DOTALL)
+        if m: t=m.group(0)
         return json.loads(t)
     except json.JSONDecodeError as e:
-        logger.error(f"JSON err: {e}")
+        logger.error(f"Groq JSON parse err: {e}\nRaw: {t[:200] if 't' in dir() else 'N/A'}")
         return {"seo_title":"NQH English","meta_description":"NQH English.","focus_keyword":"",
-                "content_html":"<p>Lỗi tạo nội dung.</p>","tags":[],"category_suggestion":"Tin tức"}
+                "content_html":"<p>Lỗi tạo nội dung.</p>","tags":[],"category_suggestion":"Tin tức",
+                "_error":f"JSON parse error: {e}"}
     except Exception as e:
-        logger.error(f"Groq err: {e}"); raise
+        logger.error(f"Groq API err: {e}")
+        return {"seo_title":"NQH English","meta_description":"NQH English.","focus_keyword":"",
+                "content_html":"<p>Lỗi tạo nội dung.</p>","tags":[],"category_suggestion":"Tin tức",
+                "_error":str(e)}
 
-def write_post(raw:str, n_inline:int=0)->dict:
+def _is_groq_error(seo:dict)->bool:
+    """Kiểm tra kết quả có bị lỗi không."""
+    return bool(seo.get("_error")) or "Lỗi tạo nội dung" in seo.get("content_html","")
+
+def write_post(raw:str, n_inline:int=0, retry:int=2)->dict:
     img_ins=""
     if n_inline>0:
         img_ins=(f"\nCHÈN ẢNH: Đặt {{{{IMAGE_1}}}}, {{{{IMAGE_2}}}}... (tối đa {n_inline} placeholder)"
                  f" sau mỗi đoạn H2 trong content_html.\n"
                  f"Ví dụ: <h2>Tiêu đề</h2><p>Nội dung...</p>{{{{IMAGE_1}}}}<h2>Tiêu đề 2</h2>...\n")
-    return _groq(
-        "Bạn là SEO Content Writer chuyên nghiệp cho NQH English - trung tâm tiếng Anh thiếu nhi. "
-        "Tone thân thiện, vui tươi. Chỉ trả về JSON thuần túy.",
-        f"Viết bài blog chuẩn SEO cho NQH English:\n\nNỘI DUNG GỐC:\n{raw}\n\n"
-        f"{SEO_2026_BASE}{rules_prompt()}{img_ins}\n"
-        f"YÊU CẦU: tối thiểu 600 từ, hook câu đầu, đề cập NQH English 1-2 lần, KHÔNG copy nguyên văn.\n\n"
-        f"JSON:\n{{\n  \"seo_title\": \"...\",\n  \"meta_description\": \"...\",\n"
-        f"  \"focus_keyword\": \"...\",\n  \"content_html\": \"...\",\n"
-        f"  \"tags\": [\"tag1\",\"tag2\",\"tag3\"],\n  \"category_suggestion\": \"...\"\n}}"
-    )
+    sys_p=("Bạn là SEO Content Writer chuyên nghiệp cho NQH English - trung tâm tiếng Anh thiếu nhi. "
+           "Tone thân thiện, vui tươi. Chỉ trả về JSON thuần túy, không có text nào khác ngoài JSON.")
+    usr_p=(f"Viết bài blog chuẩn SEO cho NQH English:\n\nNỘI DUNG GỐC:\n{raw}\n\n"
+           f"{SEO_2026_BASE}{rules_prompt()}{img_ins}\n"
+           f"YÊU CẦU: tối thiểu 600 từ, hook câu đầu, đề cập NQH English 1-2 lần, KHÔNG copy nguyên văn.\n\n"
+           f"Trả về JSON theo đúng format này (không có text nào khác):\n"
+           f"{{\n  \"seo_title\": \"...\",\n  \"meta_description\": \"...\",\n"
+           f"  \"focus_keyword\": \"...\",\n  \"content_html\": \"...\",\n"
+           f"  \"tags\": [\"tag1\",\"tag2\",\"tag3\"],\n  \"category_suggestion\": \"...\"\n}}")
+    for attempt in range(retry+1):
+        result = _groq(sys_p, usr_p)
+        if not _is_groq_error(result):
+            return result
+        if attempt < retry:
+            logger.warning(f"write_post attempt {attempt+1} failed, retrying...")
+            import time; time.sleep(1)
+    return result  # trả về dù lỗi sau retry
 
 def refine_post(html:str, req:str, seo:dict)->dict:
     return _groq(
-        "Bạn là SEO Content Writer cho NQH English. Thực hiện đúng yêu cầu chỉnh sửa, giữ placeholder {{IMAGE_N}}. JSON thuần túy.",
+        "Bạn là SEO Content Writer cho NQH English. Thực hiện đúng yêu cầu chỉnh sửa, giữ placeholder {IMAGE_N}. JSON thuần túy.",
         f"BÀI HIỆN TẠI:\nTiêu đề: {seo.get('seo_title','')}\nHTML: {html}\n\n"
         f"YÊU CẦU CHỈNH: \"{req}\"\n\n{SEO_2026_BASE}{rules_prompt()}\n"
         f"Giữ {{{{IMAGE_N}}}} nếu có. JSON:\n{{\n  \"seo_title\": \"...\",\n  \"meta_description\": \"...\",\n"
@@ -258,7 +287,7 @@ def wp_upload(img_bytes:bytes, fname:str="image.jpg", ct:str="image/jpeg")->tupl
         r=requests.post(f"{WP_URL}/wp-json/wp/v2/media",headers=h,data=img_bytes,timeout=30)
         if r.status_code in (200,201):
             d=r.json(); return d.get("id"), d.get("source_url","")
-        logger.error(f"wp_upload {r.status_code}")
+        logger.error(f"wp_upload {r.status_code}: {r.text[:200]}")
     except Exception as e: logger.error(f"wp_upload: {e}")
     return None, None
 
@@ -304,10 +333,22 @@ async def process_photos(bot, chat_id:int, user_id:int, file_ids:list, caption:s
     try:
         images_bytes=[]
         for i,fid in enumerate(file_ids):
-            pf=await bot.get_file(fid)
-            buf=io.BytesIO()
-            await pf.download_to_memory(buf)
-            images_bytes.append(buf.getvalue())
+            try:
+                pf=await bot.get_file(fid)
+                buf=io.BytesIO()
+                await pf.download_to_memory(buf)
+                images_bytes.append(buf.getvalue())
+                logger.info(f"Tải ảnh {i+1}/{len(file_ids)} OK ({len(buf.getvalue())} bytes)")
+            except Exception as e:
+                logger.error(f"Tải ảnh {i+1} lỗi: {e}")
+                # Bỏ qua ảnh lỗi, tiếp tục
+
+        if not images_bytes:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=msg.message_id,
+                text="❌ Không tải được ảnh nào. Vui lòng thử lại."
+            )
+            return
 
         raw_text = caption.strip() if len(caption.strip())>=10 else "Hoạt động mới tại NQH English"
         n_inline = len(images_bytes)-1  # ảnh 1 = thumbnail, còn lại chèn trong bài
@@ -315,10 +356,20 @@ async def process_photos(bot, chat_id:int, user_id:int, file_ids:list, caption:s
 
         await bot.edit_message_text(
             chat_id=chat_id, message_id=msg.message_id,
-            text=f"⚡ Groq AI viết bài ({len(images_bytes)} ảnh)...\n📚 {len(r)} quy tắc + SEO 2026"
+            text=f"⚡ Groq AI viết bài ({len(images_bytes)} ảnh)...\n📚 {len(r)} quy tắc + SEO 2026\n⏳ Vui lòng chờ 10-30 giây..."
         )
 
         seo = write_post(raw_text, n_inline=n_inline)
+
+        # Kiểm tra Groq có lỗi không
+        if _is_groq_error(seo):
+            err_msg = seo.get("_error","Không rõ nguyên nhân")
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=msg.message_id,
+                text=f"❌ *Groq AI lỗi* (đã thử {3} lần)\n\n`{err_msg[:300]}`\n\nVui lòng thử lại sau.",
+                parse_mode="Markdown"
+            )
+            return
 
         pending_set(user_id,{
             "seo_data":     seo,
@@ -337,7 +388,7 @@ async def process_photos(bot, chat_id:int, user_id:int, file_ids:list, caption:s
         logger.error(f"process_photos: {e}", exc_info=True)
         await bot.edit_message_text(
             chat_id=chat_id, message_id=msg.message_id,
-            text=f"❌ Lỗi:\n`{str(e)[:300]}`", parse_mode="Markdown"
+            text=f"❌ Lỗi xử lý ảnh:\n`{str(e)[:300]}`", parse_mode="Markdown"
         )
 
 # ============================================================
@@ -353,21 +404,28 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id   = msg.chat_id
 
     if gid:
-        # ── ALBUM: gom ảnh vào file, đợi 2.5s rồi xử lý ──
-        mg_add(str(gid), fid, caption)
+        # ── ALBUM: gom ảnh vào file, đợi 3s rồi xử lý ──
+        mg_add_full(str(gid), fid, caption, chat_id, user_id)
 
         # Huỷ task cũ nếu có
         old_task = _mg_tasks.get(gid)
         if old_task and not old_task.done():
             old_task.cancel()
 
-        async def _delayed():
-            await asyncio.sleep(2.5)
-            info = mg_get(str(gid))
-            mg_del(str(gid))
-            _mg_tasks.pop(gid, None)
-            if info:
-                await process_photos(context.bot, chat_id, user_id, info["photos"], info.get("caption",""))
+        async def _delayed(group_id=gid, cid=chat_id, uid=user_id):
+            try:
+                await asyncio.sleep(3.0)  # tăng lên 3s để đảm bảo gom đủ ảnh
+                info = mg_get(str(group_id))
+                mg_del(str(group_id))
+                _mg_tasks.pop(group_id, None)
+                if info and info.get("photos"):
+                    logger.info(f"Album {group_id}: {len(info['photos'])} ảnh → xử lý")
+                    await process_photos(context.bot, cid, uid,
+                                         info["photos"], info.get("caption",""))
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"_delayed album error: {e}", exc_info=True)
 
         _mg_tasks[gid] = asyncio.create_task(_delayed())
 
@@ -416,8 +474,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         r=rules_load()
-        await m.edit_text(f"⚡ Groq AI viết bài...\n📚 {len(r)} quy tắc + SEO 2026")
+        await m.edit_text(f"⚡ Groq AI viết bài...\n📚 {len(r)} quy tắc + SEO 2026\n⏳ Vui lòng chờ 10-30 giây...")
         seo=write_post(raw)
+
+        if _is_groq_error(seo):
+            err_msg = seo.get("_error","Không rõ nguyên nhân")
+            await m.edit_text(f"❌ *Groq AI lỗi*\n\n`{err_msg[:300]}`\n\nVui lòng thử lại.",parse_mode="Markdown")
+            return
 
         pending_set(uid,{"seo_data":seo,"images_bytes":[],"image_url":img_url,"source":txt if is_fb else "Text"})
         ni=1 if img_url else 0
@@ -440,11 +503,13 @@ async def handle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith("rewrite_"):
         pi=pending_get(uid)
         if not pi: await q.edit_message_text("⚠️ Không tìm thấy. Gửi lại."); return
-        await q.edit_message_text("🔄 Đang viết lại...")
+        await q.edit_message_text("🔄 Đang viết lại...\n⏳ Vui lòng chờ 10-30 giây...")
         try:
             ni=max(0,len(pi.get("images_bytes") or [])-1)
             raw=f"[Viết lại phong cách khác, sáng tạo hơn]\n{pi['seo_data']['content_html']}"
             seo=write_post(raw,n_inline=ni)
+            if _is_groq_error(seo):
+                await q.edit_message_text(f"❌ Groq lỗi: {seo.get('_error','')[:200]}"); return
             pending_upd(uid,seo)
             nim=len(pi.get("images_bytes") or [])
             await q.edit_message_text(preview_text(seo,n_img=nim),parse_mode="Markdown",reply_markup=keyboard(uid))
@@ -465,6 +530,10 @@ async def handle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if not ib: continue
                     await q.edit_message_text(f"🖼️ Upload ảnh {i+1}/{total}...")
                     mid,murl=wp_upload(ib,f"nqh-{i+1}.jpg","image/jpeg")
+                    if mid is None:
+                        logger.warning(f"Upload ảnh {i+1} thất bại, bỏ qua")
+                        if i>0: inline_urls.append("")
+                        continue
                     if i==0: thumb_id=mid
                     else: inline_urls.append(murl)
             elif pi.get("image_url"):
@@ -497,7 +566,7 @@ async def cmd_start(u:Update,c:ContextTypes.DEFAULT_TYPE):
     if not is_ok(u.effective_user.id): return
     r=rules_load()
     await u.message.reply_text(
-        "👋 *NQH English Bot v7.0*\n\n"
+        "👋 *NQH English Bot v7.1*\n\n"
         "📸 *Gửi ảnh:*\n"
         "• 1 ảnh + caption → viết bài + thumbnail\n"
         "• Nhiều ảnh (album) + caption → ảnh 1 thumbnail, ảnh 2+ chèn trong bài\n\n"
@@ -526,7 +595,7 @@ async def cmd_help(u:Update,c:ContextTypes.DEFAULT_TYPE):
         "`/teach mỗi bài có ít nhất 1 ví dụ thực tế`\n\n"
         "*Gửi nhiều ảnh:*\n"
         "Chọn nhiều ảnh → Gửi dưới dạng album trong Telegram\n"
-        "Viết caption → Bot tự xử lý",
+        "Viết caption → Bot tự gom đủ ảnh rồi xử lý (chờ ~3s)",
         parse_mode="Markdown"
     )
 
@@ -607,7 +676,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_cb))
-    logger.info(f"🤖 NQH English Bot v7.0 | {GROQ_MODEL}")
+    logger.info(f"🤖 NQH English Bot v7.1 | {GROQ_MODEL}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__=="__main__":
