@@ -501,7 +501,52 @@ def build_image_block(urls:list, keyphrase:str, start_index:int=1)->str:
 # ============================================================
 # GROQ AI
 # ============================================================
+def _clean_groq_json(t: str) -> str:
+    """Làm sạch JSON từ Groq: xoá code block, tìm JSON object, fix control chars."""
+    # 1. Xoá markdown code block
+    t = re.sub(r"```json\s*", "", t)
+    t = re.sub(r"```\s*", "", t)
+    t = t.strip()
+
+    # 2. Tìm JSON object đầu tiên (bỏ text thừa trước/sau)
+    m = re.search(r'\{.*\}', t, re.DOTALL)
+    if m:
+        t = m.group(0)
+
+    # 3. Fix control characters không hợp lệ trong JSON
+    # Thay literal newline/tab/carriage return bên trong string JSON thành escaped version
+    # Chỉ xử lý các char trong range 0x00-0x1f (trừ 0x20 trở lên là ok)
+    def fix_ctrl(s: str) -> str:
+        result = []
+        in_string = False
+        i = 0
+        while i < len(s):
+            c = s[i]
+            if c == '\\' and in_string:
+                # escape sequence — giữ nguyên 2 ký tự
+                result.append(c)
+                if i + 1 < len(s):
+                    result.append(s[i+1])
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if c == '"':
+                in_string = not in_string
+                result.append(c)
+            elif in_string and ord(c) < 0x20:
+                # Control character trong string → escape nó
+                esc = {'\n': '\\n', '\r': '\\r', '\t': '\\t'}.get(c, f'\\u{ord(c):04x}')
+                result.append(esc)
+            else:
+                result.append(c)
+            i += 1
+        return ''.join(result)
+
+    return fix_ctrl(t)
+
 def _groq(sys_p:str,usr_p:str)->dict:
+    t = ""
     try:
         resp=groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -513,10 +558,18 @@ def _groq(sys_p:str,usr_p:str)->dict:
         if usage: token_add(usage.prompt_tokens, usage.completion_tokens)
 
         t=resp.choices[0].message.content.strip()
-        t=re.sub(r"```json\s*","",t); t=re.sub(r"```\s*","",t)
+        t=_clean_groq_json(t)
         return json.loads(t)
     except json.JSONDecodeError as e:
-        logger.error(f"JSON err:{e}")
+        logger.error(f"JSON err:{e}\nRaw (200 chars): {t[:200]}")
+        # Fallback: thử xoá toàn bộ control chars rồi parse lại
+        try:
+            t2 = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', t)
+            m = re.search(r'\{.*\}', t2, re.DOTALL)
+            if m:
+                return json.loads(m.group(0))
+        except Exception:
+            pass
         return {"seo_title":"NQH English","meta_description":"Trung tâm tiếng Anh NQH English - nơi các bé học tiếng Anh hiệu quả và vui vẻ.","focus_keyword":"",
                 "content_html":"<p>Lỗi tạo nội dung.</p>","tags":[],"category_suggestion":"Tin tức",
                 "outbound_links":[],"internal_links":[]}
