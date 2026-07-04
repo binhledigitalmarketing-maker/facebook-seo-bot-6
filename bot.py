@@ -685,7 +685,7 @@ async def process_photos(bot,chat_id:int,user_id:int,file_ids:list,caption:str):
         n_inline=len(images_bytes)-1; r=rules_load()
         await bot.edit_message_text(chat_id=chat_id,message_id=msg.message_id,
             text=f"⚡ Groq AI viết bài Yoast 90+ ({len(images_bytes)} ảnh)...\n📚 {len(r)} quy tắc")
-        seo=write_post(raw_text,n_inline_images=n_inline)
+        seo=write_post(raw_text,n_inline=n_inline)
         pending_set(user_id,{"seo_data":seo,"images_bytes":images_bytes,"image_url":"","source":f"{len(images_bytes)} ảnh"})
         await bot.edit_message_text(chat_id=chat_id,message_id=msg.message_id,
             text=preview_text(seo,n_img=len(images_bytes)),parse_mode="Markdown",reply_markup=keyboard(user_id))
@@ -762,7 +762,7 @@ async def handle_message(update:Update,context:ContextTypes.DEFAULT_TYPE):
             )
 
             n_inline=max(0,min(img_count,9)-1) if img_count>0 else 0
-            seo=write_post(raw,n_inline_images=n_inline)
+            seo=write_post(raw,n_inline=n_inline)
 
             pending_set(uid,{
                 "seo_data":seo,
@@ -808,7 +808,7 @@ async def handle_cb(update:Update,context:ContextTypes.DEFAULT_TYPE):
             sc_imgs=pi.get("scraped_image_urls",[])
             if sc_imgs: ni=max(0,min(len(sc_imgs),9)-1)
             raw=f"[Viết lại phong cách khác]\n{pi['seo_data']['content_html']}"
-            seo=write_post(raw,n_inline_images=ni)
+            seo=write_post(raw,n_inline=ni)
             pending_upd(uid,seo)
             nim=len(pi.get("images_bytes") or []) or len(sc_imgs)
             await q.edit_message_text(preview_text(seo,n_img=nim),parse_mode="Markdown",reply_markup=keyboard(uid))
